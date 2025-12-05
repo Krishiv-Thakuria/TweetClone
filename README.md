@@ -1,6 +1,6 @@
-# TweetClone - AI Personality Cloning Platform
+# TweetClone - Clone Anyone
 
-TweetClone is an advanced AI chat application that allows you to clone anyone's Twitter/X personality and chat with an AI that responds exactly like them. Using sophisticated statistical analysis of writing patterns, rhythm, vocabulary, and communication style, TweetClone creates highly accurate personality clones from Twitter profiles.
+TweetClone lets you clone anyone's Twitter/X personality and chat with an AI that responds exactly like them. Using statistical analysis of writing patterns, rhythm, vocabulary, and communication style, TweetClone tries to create highly accurate personality clones from Twitter profiles.
 
 ## 🌟 Features
 
