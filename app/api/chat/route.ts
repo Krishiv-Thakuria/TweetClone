@@ -33,9 +33,9 @@ export async function POST(req: NextRequest) {
     // Apply persona style if it has been pre-configured - THIS COMES FIRST
     if (personaStyle && typeof personaStyle === 'string' && personaStyle.trim().length > 0) {
       // Extract few-shot examples and feature analysis if present
-      const fewShotMatch = personaStyle.match(/(?:FEW-SHOT TWEET EXAMPLES|REAL TWEETS FROM THIS PERSON)[:\s]*\n([\s\S]+?)(?=\n\n|$)/);
-      const featureMatch = personaStyle.match(/FEATURE ANALYSIS[:\s]*\n([\s\S]+?)(?=\n\n(?:FEW-SHOT|REAL TWEETS)|$)/);
-      const gptPatternsMatch = personaStyle.match(/(?:common GPT patterns|GPT patterns that would be WRONG)[:\s]*\n([\s\S]+?)(?=\n\n|$)/i);
+      const fewShotMatch = personaStyle.match(/(?:=== REAL TWEETS FROM THIS PERSON|FEW-SHOT TWEET EXAMPLES|REAL TWEETS FROM THIS PERSON)[:\s]*\n([\s\S]+?)(?=\n\n===|$)/);
+      const featureMatch = personaStyle.match(/(?:=== ENFORCED STYLE RULES|=== DETAILED STATISTICAL STYLE ANALYSIS|FEATURE ANALYSIS)[:\s]*\n([\s\S]+?)(?=\n\n(?:===|FEW-SHOT|REAL TWEETS)|$)/);
+      const gptPatternsMatch = personaStyle.match(/(?:common GPT patterns|GPT patterns that would be WRONG|IDENTIFY GPT PATTERNS)[:\s]*\n([\s\S]+?)(?=\n\n|$)/i);
       const fewShotExamples = fewShotMatch ? fewShotMatch[1].trim() : '';
       const featureAnalysis = featureMatch ? featureMatch[1].trim() : '';
       const gptPatternsToAvoid = gptPatternsMatch ? gptPatternsMatch[1].trim() : '';
@@ -49,9 +49,9 @@ export async function POST(req: NextRequest) {
       
       // Restructure to put tweets FIRST and make style matching more direct
       const styleDescription = personaStyle
-        .replace(/(?:FEW-SHOT TWEET EXAMPLES|REAL TWEETS FROM THIS PERSON)[:\s]*\n[\s\S]*?(?=\n\n|$)/g, '')
-        .replace(/FEATURE ANALYSIS[:\s]*\n[\s\S]*?(?=\n\n|$)/g, '')
-        .replace(/(?:common GPT patterns|GPT patterns that would be WRONG)[:\s]*\n[\s\S]*?(?=\n\n|$)/gi, '')
+        .replace(/(?:=== REAL TWEETS FROM THIS PERSON|FEW-SHOT TWEET EXAMPLES|REAL TWEETS FROM THIS PERSON)[:\s]*\n[\s\S]*?(?=\n\n===|$)/g, '')
+        .replace(/(?:=== ENFORCED STYLE RULES|=== DETAILED STATISTICAL STYLE ANALYSIS|FEATURE ANALYSIS)[:\s]*\n[\s\S]*?(?=\n\n(?:===|$))/g, '')
+        .replace(/(?:common GPT patterns|GPT patterns that would be WRONG|IDENTIFY GPT PATTERNS)[:\s]*\n[\s\S]*?(?=\n\n|$)/gi, '')
         .trim();
       
       // Build GPT patterns to avoid section

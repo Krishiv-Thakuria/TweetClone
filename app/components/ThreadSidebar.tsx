@@ -25,6 +25,7 @@ interface ThreadSidebarProps {
   onSendReply: (content: string, images?: string[]) => void;
   isLoading?: boolean;
   profilePictureUrl?: string;
+  assistantName?: string;
 }
 
 export default function ThreadSidebar({
@@ -136,7 +137,7 @@ export default function ThreadSidebar({
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-white mb-1">Chat</div>
+              <div className="text-sm font-medium text-white mb-1">{assistantName || 'Chat'}</div>
               {messageImages && messageImages.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {messageImages.map((image, index) => (
@@ -214,7 +215,7 @@ export default function ThreadSidebar({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-sm font-medium text-white">
-                          {isUser ? 'You' : 'Chat'}
+                          {isUser ? 'You' : assistantName || 'Chat'}
                         </span>
                         <span className="text-xs text-gray-400">
                           {formatMessageTimestamp(reply.timestamp)}
@@ -282,7 +283,7 @@ export default function ThreadSidebar({
                     )}
                   </div>
                   <div className="flex-1">
-                    <div className="text-sm font-medium text-white mb-1">Chat</div>
+                    <div className="text-sm font-medium text-white mb-1">{assistantName || 'Chat'}</div>
                     <div className="text-[#d1d5db] flex items-center gap-1">
                       <div className="flex gap-1">
                         <div className="w-1.5 h-1.5 bg-[#19C37D] rounded-full animate-pulse" style={{ animationDelay: '0s' }}></div>

@@ -1,10 +1,16 @@
-export async function getTwitterProfilePictureUrl(
+interface TwitterBasicProfile {
+  username: string;
+  name: string | null;
+  profileImageUrl: string | null;
+}
+
+async function getTwitterBasicProfile(
   profileUrl: string
-): Promise<string | null> {
+): Promise<TwitterBasicProfile | null> {
   try {
     const token = process.env.TWITTER_BEARER_TOKEN;
     if (!token) {
-      console.warn('TWITTER_BEARER_TOKEN is not set; cannot fetch profile picture.');
+      console.warn('TWITTER_BEARER_TOKEN is not set; cannot fetch profile.');
       return null;
     }
 
@@ -21,10 +27,13 @@ export async function getTwitterProfilePictureUrl(
       Authorization: `Bearer ${token}`,
     };
 
-    // Get user data from username - include user.fields to get profile_image_url
-    const userRes = await fetch(`https://api.x.com/2/users/by/username/${username}?user.fields=profile_image_url`, {
-      headers,
-    });
+    // Get user data from username - include user.fields to get profile_image_url and name
+    const userRes = await fetch(
+      `https://api.x.com/2/users/by/username/${username}?user.fields=profile_image_url,name`,
+      {
+        headers,
+      }
+    );
 
     if (!userRes.ok) {
       console.error('Failed to resolve Twitter user by username:', username, userRes.status);
@@ -32,24 +41,45 @@ export async function getTwitterProfilePictureUrl(
     }
 
     const userJson: any = await userRes.json();
-    const profileImageUrl = userJson?.data?.profile_image_url;
-    
+    const profileImageUrlRaw = userJson?.data?.profile_image_url || null;
+    const name = (userJson?.data?.name as string | undefined) || null;
+
+    const profileImageUrl = profileImageUrlRaw
+      ? profileImageUrlRaw.replace('_normal', '_400x400')
+      : null;
+
     if (!profileImageUrl) {
       console.warn('No profile image URL found for Twitter username:', username);
-      return null;
     }
 
-    // Replace _normal with _400x400 for better quality
-    return profileImageUrl.replace('_normal', '_400x400');
+    return {
+      username,
+      name,
+      profileImageUrl,
+    };
   } catch (err) {
-    console.error('Error while fetching Twitter profile picture:', err);
+    console.error('Error while fetching Twitter profile:', err);
     return null;
   }
 }
 
+export async function getTwitterProfilePictureUrl(
+  profileUrl: string
+): Promise<string | null> {
+  const basic = await getTwitterBasicProfile(profileUrl);
+  return basic?.profileImageUrl ?? null;
+}
+
+export async function getTwitterProfileDisplayName(
+  profileUrl: string
+): Promise<string | null> {
+  const basic = await getTwitterBasicProfile(profileUrl);
+  return basic?.name ?? null;
+}
+
 export async function getRecentTweetsFromProfileUrl(
   profileUrl: string,
-  maxTweets: number = 120
+  maxTweets: number = 1000
 ): Promise<string[]> {
   try {
     const token = process.env.TWITTER_BEARER_TOKEN;

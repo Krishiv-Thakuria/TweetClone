@@ -22,9 +22,20 @@ interface ChatMessageProps {
   isPinned?: boolean;
   onSaveAsMemory?: (content: string) => void;
   profilePictureUrl?: string;
+  assistantName?: string;
 }
 
-export default function ChatMessage({ message, messageIndex, replyCount, onOpenThread, onTogglePin, isPinned = false, onSaveAsMemory, profilePictureUrl }: ChatMessageProps) {
+export default function ChatMessage({
+  message,
+  messageIndex,
+  replyCount,
+  onOpenThread,
+  onTogglePin,
+  isPinned = false,
+  onSaveAsMemory,
+  profilePictureUrl,
+  assistantName = 'Chat',
+}: ChatMessageProps) {
   const isUser = message.role === 'user';
   const [imageError, setImageError] = useState(false);
 
@@ -84,7 +95,7 @@ export default function ChatMessage({ message, messageIndex, replyCount, onOpenT
             </svg>
           )}
           <span className="text-sm font-medium text-white">
-            {isUser ? 'You' : 'Chat'}
+            {isUser ? 'You' : assistantName}
           </span>
           <span className="text-xs text-gray-400">
             {formatMessageTimestamp(message.timestamp)}

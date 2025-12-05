@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 import { performWebSearch } from '../../utils/webSearch';
-import { getRecentTweetsFromProfileUrl, getTwitterProfilePictureUrl } from '../../utils/twitter';
+import { getRecentTweetsFromProfileUrl, getTwitterProfilePictureUrl, getTwitterProfileDisplayName } from '../../utils/twitter';
+import { analyzeWritingStyle, formatStyleMetricsForPrompt } from '../../utils/styleAnalyzer';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -24,63 +25,88 @@ export async function POST(req: NextRequest) {
 
     const trimmedUrl = twitterProfileUrl.trim();
 
-    // Get profile picture URL
-    const profilePictureUrl = await getTwitterProfilePictureUrl(trimmedUrl);
+    // Get profile picture URL + display name
+    const [profilePictureUrl, displayName] = await Promise.all([
+      getTwitterProfilePictureUrl(trimmedUrl),
+      getTwitterProfileDisplayName(trimmedUrl),
+    ]);
 
     // First attempt: use the official Twitter/X API (via helper) to get recent tweets.
     // This requires TWITTER_BEARER_TOKEN to be set in the environment.
-    const tweets = await getRecentTweetsFromProfileUrl(trimmedUrl, 200);
+    // Fetch up to 1000 tweets for comprehensive analysis
+    const tweets = await getRecentTweetsFromProfileUrl(trimmedUrl, 1000);
 
-    // Secondary signal: fall back to web search if we couldn't pull tweets directly
+    // Comprehensive web research for additional context
     let searchResults: any[] = [];
+    const searchQueries = [
+      `Recent tweets and writing style of ${trimmedUrl} - analyze their communication patterns`,
+      `Writing style analysis of Twitter user ${trimmedUrl} - tone, vocabulary, sentence structure`,
+      `How does ${trimmedUrl} write on Twitter - communication patterns and linguistic style`,
+      `Twitter writing patterns of ${trimmedUrl} - analyze their tweet style and personality`,
+    ];
+
+    // Perform multiple web searches in parallel for comprehensive coverage
     try {
-      const genericResults = await performWebSearch(
-        `Recent tweets and writing style of the person at this Twitter/X profile: ${trimmedUrl}. Focus on their most recent posts and how they write, not on biographical details.`
+      const searchPromises = searchQueries.map(query => performWebSearch(query));
+      const allSearchResults = await Promise.all(searchPromises);
+      searchResults = allSearchResults.flat().filter((r, idx, self) => 
+        idx === self.findIndex((t) => t.url === r.url) // Deduplicate by URL
       );
-      if (genericResults && genericResults.length > 0) {
-        searchResults = genericResults;
-      }
     } catch (err) {
       console.error('Error during persona web search for profile:', trimmedUrl, err);
     }
+
+    // Perform detailed statistical analysis of writing style
+    const styleMetrics = analyzeWritingStyle(tweets);
+    const metricsAnalysis = formatStyleMetricsForPrompt(styleMetrics);
 
     let systemMessage;
     let userMessage;
 
     // Case 1: we have some tweet-like content (tweets and/or search snippets)
     if ((tweets && tweets.length > 0) || (searchResults && searchResults.length > 0)) {
-      // Sample tweets to balance recency and variety:
-      // - Take the first N for recency
-      // - Take some from the middle and end if we have enough, to avoid only capturing a transient phase
-      const maxExamples = 80;
+      // Sample tweets strategically for comprehensive coverage:
+      // - Take more recent tweets (they reflect current style)
+      // - Sample from across the timeline for style consistency
+      // - Use up to 150 tweets for few-shot examples (much more than before)
+      const maxExamples = 150;
       const sampledTweets: string[] = [];
       const uniqueTweets = Array.from(new Set(tweets)); // basic de-dup
 
       const addSample = (idx: number) => {
-        if (idx >= 0 && idx < uniqueTweets.length) {
+        if (idx >= 0 && idx < uniqueTweets.length && !sampledTweets.includes(uniqueTweets[idx])) {
           sampledTweets.push(uniqueTweets[idx]);
         }
       };
 
-      // Always take the most recent chunk
-      const recentCount = Math.min(40, uniqueTweets.length);
+      // Strategy: Take more from recent (most representative of current style)
+      // Then sample evenly across timeline for consistency
+      const recentCount = Math.min(80, uniqueTweets.length); // More recent tweets
       for (let i = 0; i < recentCount; i++) addSample(i);
 
-      // If we have more history, sample from middle and older sections
+      // Sample from across the timeline for style consistency
       if (uniqueTweets.length > recentCount) {
-        const middleStart = Math.floor(uniqueTweets.length / 3);
-        const olderStart = Math.floor((2 * uniqueTweets.length) / 3);
-        for (let i = 0; i < 20 && sampledTweets.length < maxExamples; i++) {
-          addSample(middleStart + i);
-          addSample(olderStart + i);
+        const sections = 5; // Divide timeline into 5 sections
+        for (let section = 1; section < sections; section++) {
+          const sectionStart = Math.floor((section / sections) * uniqueTweets.length);
+          const sectionSize = Math.min(20, Math.floor(uniqueTweets.length / sections));
+          for (let i = 0; i < sectionSize && sampledTweets.length < maxExamples; i++) {
+            addSample(sectionStart + i);
+          }
         }
+      }
+
+      // Ensure we have enough examples
+      while (sampledTweets.length < maxExamples && sampledTweets.length < uniqueTweets.length) {
+        const randomIdx = Math.floor(Math.random() * uniqueTweets.length);
+        addSample(randomIdx);
       }
 
       const tweetsSection =
         sampledTweets.length > 0
-          ? `TWEETS (mixed recent + older, de-duplicated, truncated if necessary):\n${sampledTweets
+          ? `RAW TWEETS (${sampledTweets.length} examples, sampled from ${uniqueTweets.length} total tweets for style coverage):\n${sampledTweets
               .slice(0, maxExamples)
-              .map((t) => `- ${t}`)
+              .map((t, i) => `${i + 1}. ${t}`)
               .join('\n')}`
           : '';
 
@@ -99,12 +125,12 @@ export async function POST(req: NextRequest) {
       systemMessage = {
         role: 'system' as const,
         content:
-          'You are an expert at distilling Twitter/X writing style from noisy web snippets and raw tweet text. You focus on surface-level style (casing, punctuation, emojis, slang, rhythm) and give tweet-like micro-examples, not biography.',
+          'You are an expert linguist and personality analyst specializing in distilling authentic writing style from large datasets. You analyze EVERY aspect of writing: vocabulary complexity, sentence rhythm, punctuation patterns, pacing, tone, and psychological traits. You create comprehensive profiles that capture not just surface features but the DEEP STRUCTURE of how someone thinks and communicates.',
       };
 
       userMessage = {
         role: 'user' as const,
-        content: `Below are raw tweets (when available) and web search snippets that approximate this Twitter/X user's **recent tweets**.\n\n${combinedContext}\n\nYour task is to create a COMPREHENSIVE personality and writing style profile that captures this person's ESSENCE, not just surface features. This profile will be used to make an AI respond EXACTLY like this person, not like GPT with a personality layer.\n\n**STEP 1: Deep Analysis** (be extremely precise):\n- Emoji usage: Count them. YES/NO. If NO, state it explicitly and emphasize it.\n- Casing pattern: all lowercase / ALL CAPS / mixed / normal (be specific)\n- Punctuation: minimal / heavy / specific patterns (ellipses? exclamation marks? periods?)\n- Average tweet length: count characters\n- Tone: formal / casual / blunt / humorous / sarcastic / serious / self-deprecating / confident / aggressive / etc.\n- Vocabulary: simple / complex / technical / slang-heavy / academic / street / etc.\n- Sentence structure: simple / complex / fragments / run-ons / varied\n- Personality traits visible in writing: Are they confident? Anxious? Playful? Serious? Cynical? Optimistic? Argumentative? Supportive? Introverted? Extroverted?\n- Communication style: Do they explain things? Do they make statements? Do they ask questions? Do they tell stories? Do they debate? Do they share thoughts?\n- Thinking patterns: Are they analytical? Emotional? Logical? Intuitive? Do they jump to conclusions? Do they overthink?\n- What makes them unique? What patterns or quirks stand out?\n- How do they handle different topics? (serious vs casual, technical vs simple, etc.)\n\n**STEP 2: Create a detailed personality-rooted style description** (10–15 bullet points):\nThis should capture WHO this person is at their core, not just how they write. Include:\n- Their core personality (confident? self-deprecating? aggressive? kind? anxious? playful?)\n- Their thinking style (analytical? emotional? quick? methodical?)\n- How they communicate (do they explain? do they assert? do they question? do they tell stories?)\n- Their relationship with language (do they play with words? are they direct? are they poetic? are they technical?)\n- Their communication patterns (do they use metaphors? do they use examples? do they use data? do they use emotions?)\n- Pacing and rhythm (fast? slow? choppy? flowing?)\n- Sentence length and structure patterns\n- Formality level\n- Emoji usage (or complete absence - be EXPLICIT)\n- Slang and vocabulary choices\n- Humor style (if any) - dry? self-deprecating? dark? light? witty?\n- Any unique quirks, catchphrases, or patterns\n- What topics/themes do they gravitate toward?\n- How do they handle disagreement or criticism?\n- What would make their response sound "off" or "not them"?\n\n**STEP 3: Extract 25–35 actual tweet examples** that best represent their style and personality. Preserve EXACT casing, punctuation, and emoji patterns. These will be used as few-shot examples.\n\n**STEP 4: Provide 10–12 additional synthetic example sentences** that feel like them but are generic (no private details). These should demonstrate their personality, not just their style. Show how they'd respond to different types of questions.\n\n**STEP 5: List common GPT patterns that would be WRONG for this person** (3–5 examples):\nWhat would generic GPT say that this person would NEVER say? What phrases or patterns should be avoided?\n\nReturn everything as a single markdown-formatted blob. The description should be so detailed that someone reading it could embody this person's personality and write authentically as them. Make it VERY clear if the person does NOT use emojis, or writes in all lowercase, etc.`,
+        content: `You have access to ${tweets.length} real tweets and web search results for this Twitter/X user: ${trimmedUrl}\n\n${metricsAnalysis}\n\n${combinedContext}\n\n**YOUR MISSION:** Create an ULTRA-DETAILED personality and writing style profile that captures EVERY nuance of how this person writes. This profile will be used to make an AI respond EXACTLY like this person - indistinguishable from their actual tweets.\n\n**STEP 1: RHYTHM & PACING ANALYSIS** (use the statistical data above):\n- Analyze their sentence rhythm: Are sentences short and punchy? Long and flowing? Varied?\n- What's their pacing? Fast (quick thoughts)? Slow (deliberate)? Erratic?\n- How do they structure thoughts? Linear? Jumping? Stream-of-consciousness?\n- What's the cadence? Staccato? Smooth? Choppy?\n- Do they use fragments intentionally? What's the fragment-to-sentence ratio?\n- How do they handle pauses? (ellipses, dashes, line breaks)\n\n**STEP 2: VOCABULARY & LANGUAGE DEPTH** (use statistical data):\n- Vocabulary level: ${styleMetrics.vocabularyComplexity} (avg word length: ${styleMetrics.avgWordLength} chars, unique ratio: ${(styleMetrics.uniqueWordRatio * 100).toFixed(1)}%)\n- Do they use simple words? Complex words? Technical terms? Slang?\n- What's their word choice pattern? Precise? Vague? Colorful? Plain?\n- Do they use contractions? (${(styleMetrics.contractionFrequency * 100).toFixed(1)}% frequency)\n- How do they handle formality? Academic? Casual? Street? Mixed?\n- What linguistic register do they operate in?\n\n**STEP 3: PUNCTUATION & STRUCTURE PATTERNS** (use statistical data):\n- Period frequency: ${styleMetrics.periodFrequency.toFixed(2)} per 100 chars - What does this tell you about their sentence completion style?\n- Comma frequency: ${styleMetrics.commaFrequency.toFixed(2)} - Do they use commas for rhythm or structure?\n- Exclamation: ${styleMetrics.exclamationFrequency.toFixed(2)} - Are they emphatic? Reserved?\n- Question marks: ${styleMetrics.questionFrequency.toFixed(2)} - Do they ask questions? Rhetorical? Genuine?\n- Ellipses: ${styleMetrics.ellipsisFrequency.toFixed(2)} - Do they trail off? Create suspense?\n- Dashes: ${styleMetrics.dashFrequency.toFixed(2)} - How do they use dashes?\n- What punctuation patterns create their unique rhythm?\n\n**STEP 4: CASING & TYPOGRAPHY** (use statistical data):\n- Lowercase ratio: ${(styleMetrics.lowercaseRatio * 100).toFixed(1)}% - Do they write in lowercase intentionally?\n- Uppercase ratio: ${(styleMetrics.uppercaseRatio * 100).toFixed(1)}% - Do they use caps for emphasis?\n- Mixed case: ${(styleMetrics.mixedCaseRatio * 100).toFixed(1)}% - What's their capitalization pattern?\n- All-caps tweets: ${styleMetrics.allCapsTweets} - When do they shout?\n- What does their casing tell you about their personality and communication style?\n\n**STEP 5: COMMUNICATION PATTERNS** (use statistical data):\n- Questions: ${(styleMetrics.questionRatio * 100).toFixed(1)}% of tweets - Do they ask questions? What kind?\n- Rhetorical questions: ${(styleMetrics.rhetoricalQuestionRatio * 100).toFixed(1)}% - Do they use rhetorical questions?\n- Statements: ${(styleMetrics.statementRatio * 100).toFixed(1)}% - Are they declarative? Assertive?\n- Exclamations: ${(styleMetrics.exclamationRatio * 100).toFixed(1)}% - How emphatic are they?\n- What's their default communication mode? Questions? Statements? Both?\n\n**STEP 6: TONE & PERSONALITY DEEP DIVE:**\n- What's their emotional baseline? Confident? Anxious? Playful? Serious? Cynical? Optimistic?\n- How do they express emotion? Directly? Indirectly? Through tone? Through structure?\n- What's their humor style? (if any) Dry? Self-deprecating? Dark? Light? Witty? Absent?\n- How do they handle disagreement? Confrontational? Diplomatic? Avoidant?\n- What's their relationship with language? Do they play with words? Are they direct? Poetic? Technical?\n- How do they think? Analytical? Emotional? Logical? Intuitive? Quick? Methodical?\n- What makes them unique? What patterns or quirks stand out across ALL their tweets?\n\n**STEP 7: CONTENT PATTERNS:**\n- What topics/themes do they gravitate toward?\n- How do they approach different topics? (serious vs casual, technical vs simple)\n- Do they explain things? Make assertions? Tell stories? Share thoughts? Debate?\n- What's their information density? Dense? Sparse? Varied?\n\n**STEP 8: CREATE COMPREHENSIVE STYLE PROFILE** (20-25 detailed bullet points):\nBased on ALL the analysis above, create a profile that captures:\n- Their core personality (who they are at their essence)\n- Their thinking patterns (how they process and express thoughts)\n- Their communication style (how they structure and deliver messages)\n- Their linguistic fingerprint (vocabulary, rhythm, pacing, punctuation, casing)\n- Their emotional patterns (how they express and handle emotions)\n- Their unique quirks and patterns (what makes them unmistakably them)\n- What would make a response sound "off" or "not them"\n\n**STEP 9: EXTRACT 80-100 BEST TWEET EXAMPLES** (from the ${sampledTweets.length} provided):\nSelect the tweets that BEST represent their style, personality, and communication patterns. Preserve EXACT casing, punctuation, and structure. These will be used as few-shot examples.\n\n**STEP 10: CREATE 20-25 SYNTHETIC EXAMPLE SENTENCES:**\nGenerate example sentences that feel EXACTLY like them but are generic (no private details). Show how they'd respond to:\n- Questions\n- Statements\n- Debates\n- Casual conversation\n- Technical topics\n- Emotional topics\n- Different contexts\n\n**STEP 11: IDENTIFY GPT PATTERNS TO BREAK** (10-15 examples):\nWhat would generic GPT say that this person would NEVER say? List specific phrases, patterns, structures, and approaches that must be avoided.\n\n**CRITICAL REQUIREMENTS:**\n1. Use the statistical data provided to ground your analysis in REAL patterns, not assumptions\n2. The profile must be so detailed that someone could write EXACTLY like them\n3. Focus on DEEP STRUCTURE (how they think) not just surface features (what they say)\n4. Make it VERY clear if they do NOT use emojis, write in lowercase, etc.\n5. Every aspect of writing style must be analyzed and documented\n\nReturn everything as a single markdown-formatted blob. The description should be ULTRA-DETAILED - comprehensive enough that an AI could embody this person's personality and write authentically as them.`,
       };
     } else {
       // Case 2: no external tweet-like content available (e.g., dev environment without network).
@@ -124,10 +150,12 @@ export async function POST(req: NextRequest) {
       };
     }
 
+    // Use GPT-4o for more sophisticated analysis (better at understanding nuanced style)
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       messages: [systemMessage, userMessage],
       temperature: 0.7,
+      max_tokens: 4000, // Allow longer, more detailed responses
     });
 
     const personaStyle = completion.choices[0]?.message?.content?.trim() || '';
@@ -142,61 +170,98 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Analyze tweets to detect features for explicit instructions
+    // Use the comprehensive style metrics for feature analysis
     let featureAnalysis = '';
-    let hasEmojis = false; // Store for use in few-shot examples
     if (tweets && tweets.length > 0) {
-      const allText = tweets.join(' ');
-      // More comprehensive emoji detection (includes all Unicode emoji ranges)
-      const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{1F900}-\u{1F9FF}]|[\u{1FA00}-\u{1FA6F}]|[\u{1FA70}-\u{1FAFF}]|[\u{2190}-\u{21FF}]|[\u{2300}-\u{23FF}]|[\u{2B00}-\u{2BFF}]|[\u{FE00}-\u{FE0F}]|[\u{200D}]/gu;
-      const emojiMatches = allText.match(emojiRegex);
-      const emojiCount = emojiMatches ? emojiMatches.length : 0;
-      const tweetsWithEmojis = tweets.filter(t => emojiRegex.test(t)).length;
-      const emojiFrequency = tweetsWithEmojis / tweets.length;
-      hasEmojis = emojiFrequency > 0.1; // More than 10% of tweets have emojis
-      
-      const mostlyLowercase = tweets.filter(t => t === t.toLowerCase() && t.length > 10).length / tweets.length > 0.7;
-      const hasAllCaps = tweets.some(t => t === t.toUpperCase() && t.length > 5);
-      const avgLength = tweets.reduce((sum, t) => sum + t.length, 0) / tweets.length;
-      
-      featureAnalysis = `\n\nFEATURE ANALYSIS (from ${tweets.length} real tweets):\n`;
+      featureAnalysis = `\n\n=== ENFORCED STYLE RULES (from ${styleMetrics.totalTweets} real tweets) ===\n\n`;
       // ALWAYS forbid emojis - user requirement
-      featureAnalysis += `- Emojis: ABSOLUTELY FORBIDDEN - You must NEVER use emojis. Not one. This is an absolute rule.\n`;
-      if (hasEmojis) {
-        featureAnalysis += `  (Note: This person does use emojis in their tweets, but you must NOT use them in your responses)\n`;
+      featureAnalysis += `**ABSOLUTE RULE - NO EMOJIS:**\n`;
+      featureAnalysis += `- You must NEVER use emojis in your responses. Not one. This is an absolute rule.\n`;
+      if (styleMetrics.emojiFrequency > 0.1) {
+        featureAnalysis += `  (Note: This person does use emojis in ${(styleMetrics.emojiFrequency * 100).toFixed(1)}% of their tweets, but you must NOT use them in your responses)\n`;
       } else {
         featureAnalysis += `  (This person does NOT use emojis, which matches the requirement)\n`;
       }
-      featureAnalysis += `- Casing: ${mostlyLowercase ? 'MOSTLY LOWERCASE (respond in lowercase)' : hasAllCaps ? 'OFTEN ALL CAPS (use caps for emphasis)' : 'MIXED/NORMAL'}\n`;
-      featureAnalysis += `- Average tweet length: ~${Math.round(avgLength)} characters\n`;
+      featureAnalysis += `\n`;
+      
+      // Casing rules based on statistical analysis
+      featureAnalysis += `**CASING RULES:**\n`;
+      if (styleMetrics.lowercaseRatio > 0.7) {
+        featureAnalysis += `- Respond in LOWERCASE (${(styleMetrics.lowercaseRatio * 100).toFixed(1)}% of their tweets are lowercase)\n`;
+      } else if (styleMetrics.uppercaseRatio > 0.3) {
+        featureAnalysis += `- Use ALL CAPS for emphasis (${(styleMetrics.uppercaseRatio * 100).toFixed(1)}% of tweets use caps)\n`;
+      } else if (styleMetrics.mixedCaseRatio > 0.5) {
+        featureAnalysis += `- Use MIXED CASE (${(styleMetrics.mixedCaseRatio * 100).toFixed(1)}% of tweets are mixed case)\n`;
+      } else {
+        featureAnalysis += `- Use standard capitalization patterns\n`;
+      }
+      featureAnalysis += `\n`;
+      
+      // Tweet length guidance
+      featureAnalysis += `**LENGTH PATTERNS:**\n`;
+      featureAnalysis += `- Average tweet length: ${styleMetrics.avgTweetLength} characters\n`;
+      featureAnalysis += `- Short tweets (<50 chars): ${(styleMetrics.shortTweetRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Medium tweets (50-150 chars): ${(styleMetrics.mediumTweetRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Long tweets (>150 chars): ${(styleMetrics.longTweetRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Match their length distribution in your responses\n`;
+      featureAnalysis += `\n`;
+      
+      // Punctuation patterns
+      featureAnalysis += `**PUNCTUATION PATTERNS (per 100 characters):**\n`;
+      featureAnalysis += `- Periods: ${styleMetrics.periodFrequency.toFixed(2)} (${styleMetrics.periodFrequency > 1 ? 'frequent' : 'sparse'})\n`;
+      featureAnalysis += `- Commas: ${styleMetrics.commaFrequency.toFixed(2)} (${styleMetrics.commaFrequency > 1 ? 'frequent' : 'sparse'})\n`;
+      featureAnalysis += `- Exclamation marks: ${styleMetrics.exclamationFrequency.toFixed(2)} (${styleMetrics.exclamationFrequency > 0.5 ? 'emphatic' : 'reserved'})\n`;
+      featureAnalysis += `- Question marks: ${styleMetrics.questionFrequency.toFixed(2)} (${styleMetrics.questionFrequency > 0.5 ? 'question-heavy' : 'statement-heavy'})\n`;
+      featureAnalysis += `- Ellipses: ${styleMetrics.ellipsisFrequency.toFixed(2)} (${styleMetrics.ellipsisFrequency > 0.3 ? 'trails off often' : 'rarely trails'})\n`;
+      featureAnalysis += `- Dashes: ${styleMetrics.dashFrequency.toFixed(2)}\n`;
+      featureAnalysis += `- Match these punctuation frequencies in your responses\n`;
+      featureAnalysis += `\n`;
+      
+      // Vocabulary guidance
+      featureAnalysis += `**VOCABULARY LEVEL:**\n`;
+      featureAnalysis += `- Complexity: ${styleMetrics.vocabularyComplexity.toUpperCase()}\n`;
+      featureAnalysis += `- Average word length: ${styleMetrics.avgWordLength} characters\n`;
+      featureAnalysis += `- Unique word ratio: ${(styleMetrics.uniqueWordRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Use vocabulary at this complexity level\n`;
+      featureAnalysis += `\n`;
+      
+      // Sentence structure
+      featureAnalysis += `**SENTENCE STRUCTURE:**\n`;
+      featureAnalysis += `- Average sentence length: ${styleMetrics.avgSentenceLength} characters\n`;
+      featureAnalysis += `- Average words per sentence: ${styleMetrics.avgWordsPerSentence}\n`;
+      featureAnalysis += `- Fragment ratio: ${(styleMetrics.fragmentRatio * 100).toFixed(1)}% (${styleMetrics.fragmentRatio > 0.3 ? 'uses fragments often' : 'mostly complete sentences'})\n`;
+      featureAnalysis += `- Match their sentence structure patterns\n`;
+      featureAnalysis += `\n`;
+      
+      // Communication patterns
+      featureAnalysis += `**COMMUNICATION PATTERNS:**\n`;
+      featureAnalysis += `- Questions: ${(styleMetrics.questionRatio * 100).toFixed(1)}% of tweets\n`;
+      featureAnalysis += `- Rhetorical questions: ${(styleMetrics.rhetoricalQuestionRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Statements: ${(styleMetrics.statementRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Exclamations: ${(styleMetrics.exclamationRatio * 100).toFixed(1)}%\n`;
+      featureAnalysis += `- Match their communication mode distribution\n`;
     }
 
-    // Include actual tweet examples for few-shot prompting - MORE examples for better style matching
+    // Include MANY more tweet examples for few-shot prompting (100+ instead of 35)
     let fewShotExamples = '';
     if (tweets && tweets.length > 0) {
-      // Use up to 35 tweets for better style coverage (matching the persona generation request)
-      const sampleTweets = tweets.slice(0, Math.min(35, tweets.length));
+      // Use up to 100 tweets for comprehensive style coverage
+      const uniqueTweets = Array.from(new Set(tweets));
+      const sampleTweets = uniqueTweets.slice(0, Math.min(100, uniqueTweets.length));
       
       // Format tweets as example responses to show the model how to respond
-      fewShotExamples = `\n\nREAL TWEETS FROM THIS PERSON - THESE ARE EXAMPLES OF HOW THEY RESPOND:\n`;
+      fewShotExamples = `\n\n=== REAL TWEETS FROM THIS PERSON (${sampleTweets.length} examples) ===\n\n`;
       // ALWAYS forbid emojis - user requirement
       fewShotExamples += `**CRITICAL: You must NEVER use emojis in your responses. Not a single emoji. This is an absolute rule, regardless of what these examples show.**\n\n`;
-      fewShotExamples += `These ${sampleTweets.length} real tweets show how this person thinks and communicates. When you respond to the user, write EXACTLY like these examples:\n\n`;
+      fewShotExamples += `These ${sampleTweets.length} real tweets show how this person thinks and communicates. When you respond to the user, write EXACTLY like these examples - matching their rhythm, vocabulary, punctuation, casing, and personality:\n\n`;
       
-      // Format as example responses (some as standalone thoughts, some as if responding to questions)
-      const exampleFormat = sampleTweets.slice(0, 20).map((t, i) => {
-        // Alternate between different formats to show variety
-        if (i % 3 === 0) {
-          return `Example response ${Math.floor(i/3) + 1}: "${t}"`;
-        } else if (i % 3 === 1) {
-          return `How they'd respond: "${t}"`;
-        } else {
-          return `Their style: "${t}"`;
-        }
+      // Format as numbered examples for clarity
+      const exampleFormat = sampleTweets.map((t, i) => {
+        return `${i + 1}. "${t}"`;
       }).join('\n\n');
       
       fewShotExamples += exampleFormat;
-      fewShotExamples += `\n\n**REMEMBER:** Every response you give should sound like it came from the same person who wrote these tweets. Not similar - IDENTICAL in style, tone, and personality.`;
+      fewShotExamples += `\n\n**REMEMBER:** Every response you give should sound like it came from the same person who wrote these ${sampleTweets.length} tweets. Not similar - IDENTICAL in style, tone, rhythm, vocabulary, and personality. Study the patterns: how they structure sentences, their pacing, their word choice, their punctuation style. Emulate EVERY aspect.`;
     }
 
     return new Response(
@@ -205,6 +270,7 @@ export async function POST(req: NextRequest) {
         personaStyle: personaStyle + featureAnalysis + fewShotExamples,
         rawTweets: tweets && tweets.length > 0 ? tweets.slice(0, 20) : [], // Include for chat route
         profilePictureUrl: profilePictureUrl || null,
+        displayName: displayName || null,
       }),
       {
         status: 200,
