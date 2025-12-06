@@ -264,7 +264,3 @@ This is a private project. Contributions are not currently accepted.
 ## 📧 Support
 
 For issues or questions, please open an issue on the GitHub repository.
-
----
-
-**Built with ❤️ using Next.js, OpenAI, and advanced NLP techniques**
